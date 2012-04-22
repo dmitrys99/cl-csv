@@ -21,6 +21,7 @@
 (defvar *quote* #\")
 (defvar *separator* #\,)
 (defvar *newline* #?"\r\n")
+(defvar *multiline* nil)
 (defvar *always-quote* nil)
 (defvar *quote-escape* #?"${ *quote* }${ *quote* }")
 
@@ -155,6 +156,8 @@
      ((:separator *separator*) *separator*)
      ((:quote *quote*) *quote*)
      ((:escape *quote-escape*) *quote-escape*)
+     ((:multiline *multiline*) *multiline*)
+     clean-fn
      &aux
      (current (make-array 20 :element-type 'character :adjustable t :fill-pointer 0))
      (state :waiting)
@@ -197,9 +200,11 @@
                (read-line-in ()
                  (handler-case
                      ;; reset index, line and len for the next line of data
-                     (setf i -1 ;; we will increment immediately after this
-                           line (read-line in-stream)
-                           llen (length line))
+		     (progn
+		       (setf i -1 ;; we will increment immediately after this
+			     line (read-line in-stream))
+		       (if clean-fn (setf line (funcall clean-fn line)))
+		       (setf llen (length line)))
                    (end-of-file (sig)
                      (ecase state
                        (:waiting (error sig))
@@ -216,8 +221,13 @@
            (case state
              ;; in a quoted string that contains new-lines
              (:collecting-quoted
-              (store-char #\newline)
-              (read-line-in))
+	      (if *multiline*
+		  (progn
+		    (store-char #\newline)
+		    (read-line-in))
+		  (progn
+		    (finish-item)
+		    (return items))))
              (T (finish-item) (return items))))
 
           ;; the next characters are an escape sequence, start skipping
@@ -245,8 +255,9 @@
               ;; if we end up trying to read
               (setf state :waiting-for-next))
              (:collecting
-               (csv-parse-error "we are reading non quoted csv data and found a quote at ~D~%~A"
-                                i line))))
+	      (vector-push-extend c current)
+               ;(csv-parse-error "we are reading non quoted csv data and found a quote at ~D~%~A" i line)
+	       )))
           (T
            (ecase state
              (:waiting
@@ -254,10 +265,14 @@
                 (setf state :collecting)
                 (vector-push-extend c current)))
              (:waiting-for-next
-              (unless (white-space? c)
-                (csv-parse-error
-                 "We finished reading a quoted value and got more characters before a separator or EOL ~D~%~A"
-                 i line)))
+              ;(unless (white-space? c)
+                ;(csv-parse-error
+                ; "We finished reading a quoted value and got more characters before a separator or EOL ~D~%~A"
+                ; i line)
+		(setf state :collecting)
+		(vector-push-extend c current)
+		;)
+		)
              ((:collecting :collecting-quoted)
               (vector-push-extend c current))))
           )))))
@@ -289,10 +304,11 @@
            (return (coerce sample 'list)))))))
 
 (defun read-csv (stream-or-string
-                 &key row-fn map-fn sample skip-first-p
+                 &key row-fn map-fn sample skip-first-p clean-fn
                  ((:separator *separator*) *separator*)
                  ((:quote *quote*) *quote*)
-                 ((:escape *quote-escape*) *quote-escape*))
+                 ((:escape *quote-escape*) *quote-escape*)
+		 ((:multiline *multiline*) *multiline*))
   "Read in a CSV by data-row (which due to quoted newlines may be more than one
                               line from the stream)
 
@@ -311,7 +327,7 @@
         (iter
           (with data)
           (handler-case
-              (setf data (read-csv-row in-stream))
+              (setf data (read-csv-row in-stream :clean-fn clean-fn))
             (end-of-file () (finish)))
           (if row-fn
               (funcall row-fn data)
